@@ -1,0 +1,16 @@
+# ==============================================================================
+# CODEOWNERS — Oral Exam Desktop Kiosk (MF-04 BYOD Client)
+# ==============================================================================
+
+# Default owner: Lead FE & Desktop Kiosk Architect (Lê Vũ Hoàng) + Team Leader (Nguyễn Quang Thành)
+* @vhoang0507 @thanh-16
+
+# CI/CD Workflows & Release Packaging
+/.github/ @thanh-16 @vhoang0507
+/scripts/ @vhoang0507 @thanh-16
+
+# Electron Shell, Renderer UI & Native Windows Sidecar
+/electron/ @vhoang0507
+/src/ @vhoang0507
+/native/ @vhoang0507 @thanh-16
+/tests/ @vhoang0507 @nguyentrongtot

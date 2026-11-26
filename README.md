@@ -2,10 +2,16 @@
 
 Ứng dụng Desktop Kiosk cho luồng thi chính thức **MF-04** (Oral Examination System — FA26SE166), được tổ chức theo kiến trúc 3 tầng tách biệt: **Renderer React 19 (`src/`)**, **Electron Main/Preload (`electron/`)**, và **Native Windows Agent (`native/Oes.WindowsAgent/`)**.
 
+> **Nguồn gốc & Liên kết nền tảng:**
+> - Tách độc lập từ monorepo gốc [`An-LLM-based-Oral-Examination/oral-exam-system`](https://github.com/An-LLM-based-Oral-Examination/oral-exam-system) tại commit `a3d0fdd` *(giữ nguyên toàn bộ lịch sử commit của tác giả)*.
+> - Kết nối tới Backend API `.NET 8` (mặc định production `https://oralexam.io.vn/api/v1`, local `http://127.0.0.1:5000/api/v1`) thuộc repo [`oral-exam-system`](https://github.com/An-LLM-based-Oral-Examination/oral-exam-system).
+> - Bản cài đặt Windows (`.exe`) chính thức kèm mã kiểm tra `SHA256SUMS.txt` được phát hành tự động tại tab **GitHub Releases** khi gắn tag `v*.*.*`.
+
 ## Cấu trúc thư mục
 
 ```text
-desktop-kiosk/
+oral-exam-desktop-kiosk/
+├── .github/                  # CODEOWNERS + Windows CI & NSIS Release workflows
 ├── build/                    # Tài nguyên đóng gói (icon.png)
 ├── docs/                     # Tài liệu kiến trúc & walkthrough
 ├── electron/                 # Electron Main, Preload, Security, Device & Agent Bridge
@@ -14,6 +20,7 @@ desktop-kiosk/
 ├── src/                      # Ứng dụng React 19 (types, services, utils, hooks, screens, styles)
 ├── tests/                    # Bộ kiểm thử hợp đồng & đơn vị
 ├── AGENTS.md                 # Quy chuẩn kỹ thuật cục bộ cho Desktop Kiosk
+├── commitlint.config.mjs     # Chuẩn Conventional Commits v1.0.0
 ├── tsconfig.json             # Solution references (app + node)
 ├── tsconfig.app.json         # Cấu hình TS cho Renderer (src/)
 ├── tsconfig.node.json        # Cấu hình TS cho Electron & Vite configs
@@ -24,7 +31,6 @@ desktop-kiosk/
 ## Chạy môi trường phát triển (Local)
 
 ```powershell
-Set-Location .\desktop-kiosk
 npm install
 npm run verify
 npm run dev
