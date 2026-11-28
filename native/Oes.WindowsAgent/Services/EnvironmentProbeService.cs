@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32;
 using Oes.WindowsAgent.Models;
 
 namespace Oes.WindowsAgent.Services;
@@ -9,6 +10,19 @@ namespace Oes.WindowsAgent.Services;
 public sealed class EnvironmentProbeService
 {
     private const int SmCMonitors = 80;
+    private const int SmRemoteSession = 0x1000;
+
+    private static readonly string[] SmbiosVmTokens =
+    [
+        "VMware",
+        "VirtualBox",
+        "VBOX",
+        "QEMU",
+        "KVM",
+        "Xen",
+        "Parallels",
+        "Virtual Machine"
+    ];
 
     private static readonly HashSet<string> RemoteControlProcessNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -53,11 +67,17 @@ public sealed class EnvironmentProbeService
         "sharex",
         "snagit32",
         "snagiteditor",
+        "greenshot",
+        "lightshot",
         "discord",
         "zalo",
         "telegram",
+        "whatsapp",
+        "zoom",
         "chatgpt",
-        "copilot"
+        "copilot",
+        "claude",
+        "vncserver"
     };
 
     [DllImport("user32.dll")]
@@ -104,6 +124,16 @@ public sealed class EnvironmentProbeService
             }
         }
 
+        if (IsRemoteDesktopSession())
+        {
+            remoteProcesses.Add("rdp-session");
+        }
+
+        foreach (var biosIndicator in DetectSmbiosVmIndicators())
+        {
+            vmIndicators.Add(biosIndicator);
+        }
+
         return new AgentProbeResult(
             DeviceFingerprint: BuildDeviceFingerprint(),
             DisplayCount: DetectDisplayCount(),
@@ -114,6 +144,70 @@ public sealed class EnvironmentProbeService
             DisallowedProcesses: disallowedProcesses.ToArray(),
             ProbedAtUtc: DateTimeOffset.UtcNow
         );
+    }
+
+    private static bool IsRemoteDesktopSession()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        try
+        {
+            return GetSystemMetrics(SmRemoteSession) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static IReadOnlyList<string> DetectSmbiosVmIndicators()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using var biosKey = baseKey.OpenSubKey(@"HARDWARE\DESCRIPTION\System\BIOS", writable: false);
+            if (biosKey is null)
+            {
+                return Array.Empty<string>();
+            }
+
+            var fields = new[]
+            {
+                biosKey.GetValue("SystemManufacturer")?.ToString(),
+                biosKey.GetValue("SystemProductName")?.ToString()
+            };
+
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var field in fields)
+            {
+                if (string.IsNullOrWhiteSpace(field))
+                {
+                    continue;
+                }
+
+                foreach (var token in SmbiosVmTokens)
+                {
+                    if (field.Contains(token, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found.Add($"smbios:{token}");
+                    }
+                }
+            }
+
+            return found.ToArray();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
     }
 
     private static int DetectDisplayCount()
@@ -134,9 +228,31 @@ public sealed class EnvironmentProbeService
         }
     }
 
+    private static string ReadWindowsMachineGuid()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using var subKey = baseKey.OpenSubKey(@"SOFTWARE\Microsoft\Cryptography", writable: false);
+            var value = subKey?.GetValue("MachineGuid")?.ToString()?.Trim();
+            return string.IsNullOrWhiteSpace(value) ? string.Empty : value;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
     private static string BuildDeviceFingerprint()
     {
+        var machineGuid = ReadWindowsMachineGuid();
         var raw = string.Join("|",
+            machineGuid,
             Environment.MachineName,
             Environment.UserDomainName,
             Environment.ProcessorCount.ToString(),
