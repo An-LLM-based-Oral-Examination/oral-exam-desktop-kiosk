@@ -2,9 +2,11 @@ import { app } from 'electron/main'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const DEFAULT_DEV_API_BASE_URL = 'http://127.0.0.1:5000/api/v1'
-const DEFAULT_PROD_API_BASE_URL = 'https://oralexam.io.vn/api/v1'
+export const DEFAULT_DEV_API_BASE_URL = 'http://127.0.0.1:5000/api/v1'
+export const DEFAULT_PROD_API_BASE_URL = 'https://oralexam.io.vn/api/v1'
 const DEV_RENDERER_ORIGIN = 'http://127.0.0.1:5174'
+const R2_HOST_SUFFIX = '.r2.cloudflarestorage.com'
+const DEV_ALLOWED_R2_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', 'host.docker.internal'])
 
 export function isKioskMode(): boolean {
   if (app.isPackaged) return true
@@ -12,10 +14,8 @@ export function isKioskMode(): boolean {
 }
 
 export function isAltTabTestMode(): boolean {
-  const explicitTestSwitch =
-    process.env.KIOSK_DISABLE_ALT_TAB === '1' || process.argv.includes('--disable-alt-tab')
-  const testBuild = app.isPackaged && app.getVersion().includes('-test')
-  return explicitTestSwitch || testBuild
+  if (app.isPackaged) return false
+  return process.env.KIOSK_DISABLE_ALT_TAB === '1' || process.argv.includes('--disable-alt-tab')
 }
 
 export function isWindowLockdownEnabled(): boolean {
@@ -27,24 +27,43 @@ export function isAltTabLockEnabled(): boolean {
 }
 
 export function getApiBaseUrl(): string {
-  const configuredUrl = process.env.KIOSK_API_BASE_URL?.trim()
-  if (!configuredUrl) {
-    if (!app.isPackaged && !process.argv.includes('--serve-built')) {
-      return `${DEV_RENDERER_ORIGIN}/api/v1`
-    }
-    return app.isPackaged ? DEFAULT_PROD_API_BASE_URL : DEFAULT_DEV_API_BASE_URL
+  // Packaged production builds strictly lock API traffic to the official HTTPS endpoint.
+  if (app.isPackaged) {
+    return DEFAULT_PROD_API_BASE_URL
   }
 
-  const fallback = app.isPackaged ? DEFAULT_PROD_API_BASE_URL : DEFAULT_DEV_API_BASE_URL
+  const configuredUrl = process.env.KIOSK_API_BASE_URL?.trim()
+  if (!configuredUrl) {
+    if (!process.argv.includes('--serve-built')) {
+      return `${DEV_RENDERER_ORIGIN}/api/v1`
+    }
+    return DEFAULT_DEV_API_BASE_URL
+  }
+
   try {
     const parsedUrl = new URL(configuredUrl)
     if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-      return fallback
+      return DEFAULT_DEV_API_BASE_URL
     }
     return `${parsedUrl.origin}${parsedUrl.pathname.replace(/\/$/, '')}`
   } catch {
-    return fallback
+    return DEFAULT_DEV_API_BASE_URL
   }
+}
+
+export function isAllowedR2UploadHostname(hostname: string, isPackaged: boolean): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/\.$/, '')
+  if (!normalized) return false
+
+  if (normalized.endsWith(R2_HOST_SUFFIX) && normalized.length > R2_HOST_SUFFIX.length) {
+    return true
+  }
+
+  if (!isPackaged && DEV_ALLOWED_R2_HOSTS.has(normalized)) {
+    return true
+  }
+
+  return false
 }
 
 export function getDevRendererUrl(): string {

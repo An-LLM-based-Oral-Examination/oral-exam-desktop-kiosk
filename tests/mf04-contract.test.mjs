@@ -29,7 +29,9 @@ test('Desktop Kiosk matches modular 3-tier repository structure', () => {
     'src/App.tsx',
     'src/services/api.ts',
     'src/services/offline-draft.ts',
+    'src/services/turn-sync.ts',
     'src/types/mf04.types.ts',
+    'src/utils/question-image.ts',
     'src/utils/transcript-diff.ts',
     'src/hooks/useKioskHeartbeat.ts',
     'src/hooks/useAntiCheatMonitor.ts',
@@ -43,11 +45,12 @@ test('Desktop Kiosk matches modular 3-tier repository structure', () => {
   }
 })
 
-test('MF-04 API client keeps all required BYOD, Heartbeat, Per-Turn, and Follow-Up endpoints without web storage', async () => {
+test('MF-04 API client keeps all required Kiosk Auth, BYOD, Heartbeat, Per-Turn, R2 IPC, and Follow-Up contracts without web storage', async () => {
   const source = await read('src/services/api.ts')
   for (const endpoint of [
-    '/auth/password-login',
-    '/auth/refresh-token',
+    '/auth/kiosk/password-login',
+    '/auth/kiosk/refresh-token',
+    '/auth/kiosk/change-password',
     '/official-exams/tickets/current',
     '/heartbeat',
     '/audio-upload-authorizations',
@@ -59,23 +62,30 @@ test('MF-04 API client keeps all required BYOD, Heartbeat, Per-Turn, and Follow-
   ]) {
     assert.match(source, new RegExp(endpoint.replaceAll('/', '\\/')))
   }
+  assert.doesNotMatch(source, /['"`]\/auth\/(password-login|refresh-token|change-password)['"`]/)
+  assert.match(source, /finalizePerTurn/)
+  assert.match(source, /uploadAudioToR2/)
   assert.match(source, /X-Device-Id/)
   assert.match(source, /X-Kiosk-Session-Token/)
   assert.match(source, /X-Kiosk-Version/)
   assert.doesNotMatch(source, /sessionStorage|localStorage/)
 })
 
-test('MF-04 renderer enforces per-turn SHA-256 audio verification, follow-up flow, and zero grade UI', async () => {
+test('MF-04 renderer enforces per-turn SHA-256 audio verification, follow-up flow, session revocation redirect, and zero grade UI', async () => {
   const appSource = await read('src/App.tsx')
+  const turnSyncSource = await read('src/services/turn-sync.ts')
   const cryptoSource = await read('src/utils/crypto.ts')
   const submittedSource = await read('src/screens/SubmittedScreen.tsx')
   const blockedSource = await read('src/screens/BlockedScreen.tsx')
+  const combinedSource = `${appSource}\n${turnSyncSource}`
 
-  assert.match(appSource, /createQuestionAudioUploadAuthorization/)
-  assert.match(appSource, /submitQuestionAnswer/)
-  assert.match(appSource, /requestNextFollowUp/)
+  assert.match(combinedSource, /createQuestionAudioUploadAuthorization/)
+  assert.match(combinedSource, /submitQuestionAnswer/)
+  assert.match(combinedSource, /requestNextFollowUp/)
   assert.match(appSource, /useKioskHeartbeat/)
   assert.match(appSource, /useAntiCheatMonitor/)
+  assert.match(appSource, /setOnSessionRevoked/)
+  assert.match(appSource, /setScreen\('sign-in'\)/)
   assert.match(cryptoSource, /SHA-256/)
   assert.match(appSource, /submittedStatuses\.has\(response\.status\)/)
   assert.match(appSource, /clearTicketDrafts\(ticket\.id\)/)
@@ -118,15 +128,48 @@ test('CSP permits only the local API and HTTPS presigned storage', async () => {
   assert.match(source, /src="\/src\/main\.tsx"/)
 })
 
-test('Electron shell keeps renderer isolation, sandboxed preload, and navigation restrictions', async () => {
+test('Electron shell keeps renderer isolation, sandboxed preload, OPTIONS CORS bridge, R2 IPC, and release lockdown', async () => {
   const mainSource = await read('electron/main.ts')
   const securitySource = await read('electron/security.ts')
   const preloadSource = await read('electron/preload.ts')
+  const configSource = await read('electron/config.ts')
+  const pkg = JSON.parse(await read('package.json'))
 
   assert.match(mainSource, /contextIsolation: true/)
   assert.match(mainSource, /nodeIntegration: false/)
   assert.match(mainSource, /sandbox: true/)
+  assert.match(mainSource, /upload-audio-to-r2/)
+  assert.match(mainSource, /net\.fetch/)
+  assert.match(mainSource, /app\.isPackaged[\s\S]*parsedUrl\.protocol === 'https:'/)
+  assert.match(mainSource, /details\.method\.toUpperCase\(\) === 'OPTIONS'/)
+  assert.match(mainSource, /deleteHeaderIgnoreCase\(requestHeaders,\s*'origin'\)/)
   assert.match(securitySource, /setWindowOpenHandler/)
   assert.match(securitySource, /before-input-event/)
+  assert.match(preloadSource, /uploadAudioToR2/)
   assert.doesNotMatch(preloadSource, /from\s+['"]\.\.?\/|require\(['"]\.\.?\//)
+
+  assert.equal(pkg.version.includes('-test'), false, 'Release package version must not contain -test suffix')
+  assert.doesNotMatch(configSource, /includes\('-test'\)/)
+  assert.match(configSource, /if\s*\(app\.isPackaged\)\s*return\s*false/)
+  assert.match(
+    pkg.scripts['package:win'],
+    /build:native:self-contained|-SelfContained/,
+    'package:win must build self-contained Oes.WindowsAgent.exe',
+  )
+
+  const viteConfig = await read('vite.config.ts')
+  assert.match(viteConfig, /'\/api'/)
+  assert.match(viteConfig, /'\/uploads'/)
+  const windowsAgentSource = await read('electron/windows-agent.ts')
+  assert.match(windowsAgentSource, /--parent-pid/)
+})
+
+test('SignInScreen provides escape hatch out of forced change-password mode', async () => {
+  const signInSource = await read('src/screens/SignInScreen.tsx')
+  const appSource = await read('src/App.tsx')
+
+  assert.match(signInSource, /onCancelChangePassword/)
+  assert.match(signInSource, /Quay lại đăng nhập/)
+  assert.match(appSource, /function handleCancelChangePassword/)
+  assert.match(appSource, /onCancelChangePassword=\{handleCancelChangePassword\}/)
 })

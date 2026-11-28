@@ -5,17 +5,26 @@ interface LobbyScreenProps {
   ticket: StudentWorkstationTicket
   offlineDraftAvailable: boolean
   hasCompleteDraft: boolean
+  refreshingTicket?: boolean
   onStart: () => Promise<void>
   onResumeSubmit: () => Promise<void>
+  onRefreshTicket?: () => Promise<void>
 }
 
 export function LobbyScreen({
   ticket,
   offlineDraftAvailable,
   hasCompleteDraft,
+  refreshingTicket = false,
   onStart,
   onResumeSubmit,
+  onRefreshTicket,
 }: LobbyScreenProps) {
+  const isWaitingForExamPublish =
+    ticket.questions.length === 0 ||
+    ticket.shiftStatus.toLowerCase() !== 'in_progress' ||
+    ticket.isExamPublished === false
+
   return (
     <section aria-labelledby="lobby-heading">
       <div className="ticket-hero">
@@ -41,7 +50,9 @@ export function LobbyScreen({
           </div>
           <div className="meta-tile">
             <span>Số lượng câu hỏi</span>
-            <strong>{ticket.questions.length} câu hỏi</strong>
+            <strong>
+              {ticket.questions.length > 0 ? `${ticket.questions.length} câu hỏi` : 'Đang chờ phát đề'}
+            </strong>
           </div>
           <div className="meta-tile">
             <span>Bản sao lưu cục bộ</span>
@@ -49,18 +60,41 @@ export function LobbyScreen({
           </div>
         </div>
 
-        <div className="rules-note">
-          <strong>Lưu ý phòng thi:</strong> Không chuyển đổi cửa sổ hoặc thoát toàn màn hình trong lúc làm
-          bài. Sau khi nộp bài, hệ thống tự niêm phong âm thanh và không hiển thị điểm tại máy thi.
-        </div>
+        {isWaitingForExamPublish ? (
+          <div className="rules-note" role="status">
+            <strong>Đã điểm danh thành công:</strong> Ca thi đang ở trạng thái chờ mở hoặc chưa công bố bộ đề
+            (<code>{ticket.shiftStatus}</code>). Hệ thống đang tự động kiểm tra định kỳ để nhận đề ngay khi Cán bộ
+            Khảo thí mở ca.
+          </div>
+        ) : (
+          <div className="rules-note">
+            <strong>Lưu ý phòng thi:</strong> Không chuyển đổi cửa sổ hoặc thoát toàn màn hình trong lúc làm
+            bài. Sau khi nộp bài, hệ thống tự niêm phong âm thanh và không hiển thị điểm tại máy thi.
+          </div>
+        )}
 
         <div className="action-bar">
+          {isWaitingForExamPublish && onRefreshTicket ? (
+            <button
+              className="btn btn-secondary"
+              type="button"
+              disabled={refreshingTicket}
+              onClick={onRefreshTicket}
+            >
+              {refreshingTicket ? 'Đang kiểm tra đề…' : 'Làm mới trạng thái đề'}
+            </button>
+          ) : null}
           <button
             className="btn btn-primary"
             type="button"
+            disabled={isWaitingForExamPublish}
             onClick={hasCompleteDraft ? onResumeSubmit : onStart}
           >
-            {hasCompleteDraft ? 'Gửi lại bản nháp đã lưu →' : 'Bắt đầu làm bài →'}
+            {isWaitingForExamPublish
+              ? 'Đang chờ mở ca & phát đề…'
+              : hasCompleteDraft
+                ? 'Gửi lại bản nháp đã lưu →'
+                : 'Bắt đầu làm bài →'}
           </button>
         </div>
       </div>

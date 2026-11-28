@@ -5,6 +5,7 @@ import type {
   ByodConflictCode,
   ChangePasswordResponse,
   ExamAnswer,
+  ExamAntiCheatLogResponse,
   ExamTicketResponse,
   KioskHeartbeatRequest,
   KioskHeartbeatResponse,
@@ -13,6 +14,8 @@ import type {
   OfficialExamTicketStateResponse,
   ProblemDetails,
   RefreshTokenResponse,
+  SessionRevocationReason,
+  SessionRevokedEvent,
   SpeechTranscriptionResult,
   StudentWorkstationTicket,
   SubmissionStatus,
@@ -21,6 +24,17 @@ import type {
   SubmitResponse,
   WorkstationFollowUpItem,
 } from '../types/mf04.types'
+
+export const KIOSK_DEVICE_ID_REGEX = /^[A-Za-z0-9._:-]{16,128}$/
+export const KIOSK_VERSION_REGEX = /^[A-Za-z0-9._+-]{2,64}$/
+
+export function isValidKioskDeviceId(value: string | null | undefined): boolean {
+  return typeof value === 'string' && KIOSK_DEVICE_ID_REGEX.test(value.trim())
+}
+
+export function isValidKioskVersion(value: string | null | undefined): boolean {
+  return typeof value === 'string' && KIOSK_VERSION_REGEX.test(value.trim())
+}
 
 export class ApiProblemError extends Error {
   readonly status: number
@@ -36,7 +50,7 @@ export class ApiProblemError extends Error {
 
 export function classifyByodConflict(error: unknown): ByodConflictCode | null {
   if (!(error instanceof ApiProblemError) || error.status !== 409) return null
-  const combined = `${error.problem.type ?? ''} ${error.problem.detail ?? ''} ${error.message}`.toUpperCase()
+  const combined = `${error.problem.type ?? ''} ${error.problem.detail ?? ''} ${error.problem.errorCode ?? ''} ${error.message}`.toUpperCase()
   if (combined.includes('DEVICE_MISMATCH') || combined.includes('DEVICE-MISMATCH')) {
     return 'DEVICE_MISMATCH'
   }
@@ -47,6 +61,22 @@ export function classifyByodConflict(error: unknown): ByodConflictCode | null {
     return 'DEVICE_IN_USE_OTHER_TICKET'
   }
   return null
+}
+
+export function isTicketLockedError(error: unknown): boolean {
+  if (!(error instanceof ApiProblemError) || error.status !== 409) return false
+  const combined = `${error.problem.type ?? ''} ${error.problem.detail ?? ''} ${error.problem.errorCode ?? ''} ${error.message}`.toUpperCase()
+  return combined.includes('TICKET_LOCKED') || combined.includes('TICKET-LOCKED')
+}
+
+export function isTicketNotInProgressError(error: unknown): boolean {
+  if (!(error instanceof ApiProblemError) || error.status !== 409) return false
+  const combined = `${error.problem.type ?? ''} ${error.problem.detail ?? ''} ${error.problem.errorCode ?? ''} ${error.message}`.toUpperCase()
+  return (
+    combined.includes('TICKET_NOT_IN_PROGRESS') ||
+    combined.includes('TICKET-NOT-IN-PROGRESS') ||
+    combined.includes('KHÔNG Ở TRẠNG THÁI ĐANG THI')
+  )
 }
 
 export function describeByodConflict(code: ByodConflictCode): string {
@@ -64,6 +94,7 @@ interface ApiClientOptions {
   baseUrl: string
   deviceId?: string
   kioskVersion?: string
+  onSessionRevoked?: (event: SessionRevokedEvent) => void
 }
 
 interface RequestOptions {
@@ -111,6 +142,7 @@ function parseProblem(payload: unknown, status: number, fallback: string): Probl
     detail,
     status: typeof payloadStatus === 'number' ? payloadStatus : status,
     instance: readString(payload, 'instance', 'Instance'),
+    errorCode: readString(payload, 'errorCode', 'ErrorCode'),
     errors: isRecord(payload.errors) ? (payload.errors as Record<string, string[]>) : undefined,
   }
 }
@@ -120,27 +152,81 @@ function unwrap<T>(payload: unknown): T {
   return payload as T
 }
 
+interface WindowWithKioskR2Bridge {
+  kioskApi?: {
+    uploadAudioToR2?: (request: {
+      uploadUrl: string
+      headers: Record<string, string>
+      data: ArrayBuffer
+    }) => Promise<{
+      ok: boolean
+      status: number
+      statusText: string
+      headers: Record<string, string>
+      bodyText?: string
+      errorMessage?: string
+    }>
+  }
+}
+
 export class ApiClient {
   private readonly baseUrl: string
-  private readonly deviceId: string | null
+  private deviceId: string | null
   private readonly kioskVersion: string | null
+  private onSessionRevokedHandler: ((event: SessionRevokedEvent) => void) | null
   private refreshPromise: Promise<string> | null = null
   private accessToken: string | null = null
   private refreshTokenValue: string | null = null
   private kioskSessionToken: string | null = null
   private storedUser: LoginResponse['user'] | null = null
+  private sessionRevoked = false
+  private sessionEpoch = 0
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl)
-    this.deviceId = options.deviceId?.trim() || null
-    this.kioskVersion = options.kioskVersion?.trim() || null
+    const rawDeviceId = options.deviceId?.trim() || null
+    const rawKioskVersion = options.kioskVersion?.trim() || null
+    if (rawDeviceId && !KIOSK_DEVICE_ID_REGEX.test(rawDeviceId)) {
+      throw new Error('Định danh thiết bị X-Device-Id không hợp lệ theo chuẩn Kiosk.')
+    }
+    if (rawKioskVersion && !KIOSK_VERSION_REGEX.test(rawKioskVersion)) {
+      throw new Error('Phiên bản ứng dụng X-Kiosk-Version không hợp lệ theo chuẩn Kiosk.')
+    }
+    this.deviceId = rawDeviceId
+    this.kioskVersion = rawKioskVersion
+    this.onSessionRevokedHandler = options.onSessionRevoked ?? null
+  }
+
+  setOnSessionRevoked(handler: ((event: SessionRevokedEvent) => void) | null): void {
+    this.onSessionRevokedHandler = handler
+  }
+
+  private notifySessionRevoked(error: unknown): void {
+    if (this.sessionRevoked) return
+    this.sessionRevoked = true
+    this.clearSession()
+    const event = buildSessionRevokedEvent(error)
+    this.onSessionRevokedHandler?.(event)
   }
 
   getBaseUrl(): string {
     return this.baseUrl
   }
 
+  getDeviceId(): string | null {
+    return this.deviceId
+  }
+
+  setDeviceId(deviceId: string | null | undefined): void {
+    const rawDeviceId = deviceId?.trim() || null
+    if (rawDeviceId && !KIOSK_DEVICE_ID_REGEX.test(rawDeviceId)) {
+      throw new Error('Định danh thiết bị X-Device-Id không hợp lệ theo chuẩn Kiosk.')
+    }
+    this.deviceId = rawDeviceId
+  }
+
   setSession(response: LoginResponse | RefreshTokenResponse): void {
+    this.sessionRevoked = false
     this.accessToken = response.accessToken
     this.refreshTokenValue = response.refreshToken
   }
@@ -154,6 +240,8 @@ export class ApiClient {
   }
 
   clearSession(): void {
+    this.sessionEpoch += 1
+    this.refreshPromise = null
     this.accessToken = null
     this.refreshTokenValue = null
     this.kioskSessionToken = null
@@ -169,40 +257,85 @@ export class ApiClient {
   }
 
   async login(username: string, password: string): Promise<LoginResponse> {
-    const response = await this.request<LoginResponse>('/auth/password-login', {
+    const response = await this.request<LoginResponse>('/auth/kiosk/password-login', {
       method: 'POST',
       body: { username, password },
       skipAuth: true,
       skipRefresh: true,
     })
+    this.sessionEpoch += 1
     this.setSession(response)
     this.setUser(response.user)
     return response
   }
 
   async refresh(): Promise<string> {
-    const refreshToken = this.refreshTokenValue
-    if (!refreshToken) throw new Error('Không còn refresh token để khôi phục phiên.')
+    if (this.sessionRevoked) {
+      throw new ApiProblemError(
+        {
+          status: 401,
+          title: 'Phiên đăng nhập đã bị thu hồi',
+          detail: 'Phiên đăng nhập đã hết hạn hoặc bị thu hồi.',
+        },
+        401,
+      )
+    }
 
-    this.refreshPromise ??= this.request<RefreshTokenResponse>('/auth/refresh-token', {
-      method: 'POST',
-      body: { refreshToken },
-      skipAuth: true,
-      skipRefresh: true,
-    })
-      .then((response) => {
-        this.setSession(response)
-        return response.accessToken
+    const refreshToken = this.refreshTokenValue
+    if (!refreshToken) {
+      const missingError = new Error('Không còn refresh token để khôi phục phiên.')
+      this.notifySessionRevoked(missingError)
+      throw missingError
+    }
+
+    if (!this.refreshPromise) {
+      const refreshEpoch = this.sessionEpoch
+      const pendingRefresh = this.request<RefreshTokenResponse>('/auth/kiosk/refresh-token', {
+        method: 'POST',
+        body: { refreshToken },
+        skipAuth: true,
+        skipRefresh: true,
       })
-      .finally(() => {
-        this.refreshPromise = null
-      })
+        .then((response) => {
+          if (this.sessionEpoch !== refreshEpoch) {
+            throw new ApiProblemError(
+              {
+                status: 401,
+                title: 'Phiên đăng nhập đã bị thay đổi',
+                detail: 'Phiên đăng nhập đã bị xóa hoặc thay đổi trong lúc làm mới token.',
+              },
+              401,
+            )
+          }
+          this.setSession(response)
+          return response.accessToken
+        })
+        .catch((refreshError: unknown) => {
+          if (
+            this.sessionEpoch === refreshEpoch &&
+            refreshError instanceof ApiProblemError &&
+            (refreshError.status === 401 ||
+              refreshError.status === 403 ||
+              refreshError.status === 409 ||
+              refreshError.status === 400)
+          ) {
+            this.notifySessionRevoked(refreshError)
+          }
+          throw refreshError
+        })
+        .finally(() => {
+          if (this.refreshPromise === pendingRefresh) {
+            this.refreshPromise = null
+          }
+        })
+      this.refreshPromise = pendingRefresh
+    }
 
     return this.refreshPromise
   }
 
   async changePassword(currentPassword: string, newPassword: string): Promise<ChangePasswordResponse> {
-    const response = await this.request<ChangePasswordResponse>('/auth/change-password', {
+    const response = await this.request<ChangePasswordResponse>('/auth/kiosk/change-password', {
       method: 'POST',
       body: { currentPassword, newPassword },
     })
@@ -259,14 +392,15 @@ export class ApiClient {
     return normalizeHeartbeatResponse(unwrap<unknown>(payload))
   }
 
-  async logAntiCheat(request: AntiCheatLogRequest): Promise<void> {
-    await this.request('/official-exams/anti-cheat/log', {
+  async logAntiCheat(request: AntiCheatLogRequest): Promise<ExamAntiCheatLogResponse> {
+    const payload = await this.request<unknown>('/official-exams/anti-cheat/log', {
       method: 'POST',
       body: {
         ...request,
         severity: request.severity.toLowerCase(),
       },
     })
+    return normalizeAntiCheatLogResponse(unwrap<unknown>(payload), request)
   }
 
   async transcribe(audio: Blob, vocabularyHint: string, clientTranscript: string): Promise<SpeechTranscriptionResult> {
@@ -282,10 +416,13 @@ export class ApiClient {
     const record = unwrap<unknown>(payload)
     if (!isRecord(record)) throw new Error('Phản hồi STT không hợp lệ.')
     const text = readString(record, 'text', 'Text') ?? ''
+    const rawConfidence = record.confidenceScore ?? record.ConfidenceScore
     return {
       text,
       rawText: readString(record, 'rawText', 'RawText') ?? null,
       provider: readString(record, 'provider', 'Provider') ?? null,
+      timestampsJson: readString(record, 'timestampsJson', 'TimestampsJson') ?? null,
+      confidenceScore: typeof rawConfidence === 'number' && Number.isFinite(rawConfidence) ? rawConfidence : null,
     }
   }
 
@@ -317,10 +454,52 @@ export class ApiClient {
   }
 
   async uploadAudio(authorization: AudioUploadAuthorization, audio: Blob, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    const hasContentType = Object.keys(authorization.requiredHeaders).some(
+      (key) => key.toLowerCase() === 'content-type',
+    )
     const headers: Record<string, string> = {
-      'Content-Type': 'audio/webm',
+      ...(hasContentType ? {} : { 'Content-Type': 'audio/webm' }),
       ...authorization.requiredHeaders,
     }
+
+    const r2Uploader =
+      typeof window !== 'undefined'
+        ? (window as unknown as WindowWithKioskR2Bridge).kioskApi?.uploadAudioToR2
+        : undefined
+    if (r2Uploader) {
+      const buffer = await audio.arrayBuffer()
+      if (signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError')
+      }
+
+      const result = await r2Uploader({
+        uploadUrl: authorization.uploadUrl,
+        headers,
+        data: buffer,
+      })
+
+      if (!result.ok) {
+        if (result.status > 0) {
+          throw new ApiProblemError(
+            {
+              status: result.status,
+              title: 'Không tải được audio lên kho lưu trữ.',
+              detail: result.bodyText
+                ? `HTTP ${result.status}: ${result.bodyText}`
+                : `HTTP ${result.status}`,
+            },
+            result.status,
+          )
+        }
+        throw new Error(result.errorMessage || 'Không thể tải audio lên kho lưu trữ qua tiến trình chính.')
+      }
+      return
+    }
+
     const response = await fetch(authorization.uploadUrl, {
       method: 'PUT',
       headers,
@@ -391,10 +570,17 @@ export class ApiClient {
     }
   }
 
-  async submitExam(ticketId: string, answers: ExamAnswer[] = []): Promise<SubmitResponse> {
+  async submitExam(
+    ticketId: string,
+    answers: ExamAnswer[] = [],
+    finalizePerTurn: boolean = answers.length === 0,
+  ): Promise<SubmitResponse> {
     const payload = await this.request<unknown>(`/official-exams/tickets/${encodeURIComponent(ticketId)}/submission`, {
       method: 'PUT',
-      body: { answers },
+      body: {
+        answers,
+        finalizePerTurn,
+      },
     })
     const record = unwrapRecord(payload, 'Phản hồi nộp bài không hợp lệ.')
     return {
@@ -422,12 +608,17 @@ export class ApiClient {
 
   private async request<T>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
     const requestHeaders: Record<string, string> = { Accept: 'application/json', ...options.headers }
-    const token = this.accessToken
-    if (token && !options.skipAuth) requestHeaders.Authorization = `Bearer ${token}`
-    if (!options.skipAuth && path.startsWith('/official-exams/')) {
+    const sentSessionEpoch = this.sessionEpoch
+    const sentAccessToken = this.accessToken
+    if (sentAccessToken && !options.skipAuth) requestHeaders.Authorization = `Bearer ${sentAccessToken}`
+    const isKioskAuthPath = path.startsWith('/auth/kiosk/')
+    const isOfficialExamPath = path.startsWith('/official-exams/')
+    if (isKioskAuthPath || isOfficialExamPath) {
       if (this.deviceId) requestHeaders['X-Device-Id'] = this.deviceId
       if (this.kioskVersion) requestHeaders['X-Kiosk-Version'] = this.kioskVersion
-      if (this.kioskSessionToken) requestHeaders['X-Kiosk-Session-Token'] = this.kioskSessionToken
+    }
+    if (!options.skipAuth && isOfficialExamPath && this.kioskSessionToken) {
+      requestHeaders['X-Kiosk-Session-Token'] = this.kioskSessionToken
     }
 
     let body: BodyInit | undefined
@@ -445,13 +636,20 @@ export class ApiClient {
       signal: options.signal,
     })
 
-    if (response.status === 401 && !retried && !options.skipRefresh && !path.includes('/auth/')) {
-      try {
-        const refreshed = await this.refresh()
-        if (refreshed) return this.request<T>(path, options, true)
-      } catch {
-        this.clearSession()
+    const normalizedPath = path.split('?')[0]
+    const isRefreshExcludedPath =
+      normalizedPath === '/auth/kiosk/password-login' || normalizedPath === '/auth/kiosk/refresh-token'
+
+    if (response.status === 401 && !retried && !options.skipRefresh && !isRefreshExcludedPath) {
+      if (this.sessionRevoked || this.sessionEpoch !== sentSessionEpoch) {
+        const revokedPayload = await readResponsePayload(response)
+        throw new ApiProblemError(parseProblem(revokedPayload, response.status, response.statusText), response.status)
       }
+      if (this.accessToken && this.accessToken !== sentAccessToken && !options.skipAuth) {
+        return this.request<T>(path, options, true)
+      }
+      const refreshed = await this.refresh()
+      if (refreshed) return this.request<T>(path, options, true)
     }
 
     const payload = await readResponsePayload(response)
@@ -463,14 +661,47 @@ export class ApiClient {
   }
 }
 
+function buildSessionRevokedEvent(error: unknown): SessionRevokedEvent {
+  if (error instanceof ApiProblemError) {
+    let reason: SessionRevocationReason = 'SESSION_REVOKED'
+    let fallbackMessage = 'Phiên đăng nhập đã hết hạn hoặc bị thu hồi (401). Vui lòng đăng nhập lại.'
+    if (error.status === 403) {
+      reason = 'ACCOUNT_LOCKED'
+      fallbackMessage = 'Tài khoản bị khóa hoặc không có quyền sử dụng Kiosk (403).'
+    } else if (error.status === 409) {
+      reason = 'REFRESH_CONFLICT'
+      fallbackMessage = 'Phiên đăng nhập gặp xung đột làm mới token (409). Vui lòng đăng nhập lại.'
+    }
+    return {
+      status: error.status,
+      reason,
+      errorCode: error.problem.errorCode,
+      message: error.problem.detail ?? fallbackMessage,
+      error,
+    }
+  }
+
+  return {
+    status: 401,
+    reason: 'SESSION_REVOKED',
+    message: error instanceof Error ? error.message : 'Phiên đăng nhập đã hết hạn hoặc bị thu hồi.',
+    error,
+  }
+}
+
 async function readResponsePayload(response: Response): Promise<unknown> {
   if (response.status === 204) return undefined
   const contentType = response.headers.get('content-type') ?? ''
-  if (contentType.includes('application/json') || contentType.includes('+json')) {
-    return response.json() as Promise<unknown>
-  }
   const text = await response.text()
-  return text ? { detail: text } : undefined
+  if (!text) return undefined
+  if (contentType.includes('application/json') || contentType.includes('+json')) {
+    try {
+      return JSON.parse(text) as unknown
+    } catch {
+      return { detail: text }
+    }
+  }
+  return { detail: text }
 }
 
 function unwrapRecord(payload: unknown, message: string): JsonRecord {
@@ -520,6 +751,67 @@ function normalizeAudioUploadAuthorization(payload: unknown): AudioUploadAuthori
   }
 }
 
+function normalizeFollowUps(rawFollowUps: unknown): WorkstationFollowUpItem[] {
+  if (!Array.isArray(rawFollowUps)) return []
+  return rawFollowUps
+    .filter((item): item is JsonRecord => isRecord(item))
+    .map((item) => ({
+      submissionId: requiredString(item, 'submissionId', 'Follow-up thiếu submissionId.'),
+      parentSubmissionId: nullableString(item, 'parentSubmissionId'),
+      questionId: requiredAnyString(item, ['examQuestionId', 'questionId'], 'Follow-up thiếu examQuestionId.'),
+      followUpIndex: typeof item.followUpIndex === 'number' ? item.followUpIndex : 0,
+      followUpPrompt: nullableString(item, 'followUpPrompt'),
+      generatedFollowUpPrompt: nullableString(item, 'generatedFollowUpPrompt'),
+      transcriptWhisper: nullableString(item, 'transcriptWhisper'),
+      audioObjectKey: nullableString(item, 'audioObjectKey'),
+      audioHashSha256: nullableString(item, 'audioHashSha256'),
+    }))
+}
+
+function normalizeAntiCheatLogResponse(
+  payload: unknown,
+  fallbackRequest: AntiCheatLogRequest,
+): ExamAntiCheatLogResponse {
+  if (!isRecord(payload)) {
+    return {
+      id: '',
+      clientEventId: fallbackRequest.clientEventId,
+      ticketId: fallbackRequest.ticketId,
+      shiftId: fallbackRequest.shiftId,
+      studentId: fallbackRequest.studentId,
+      studentCode: '',
+      studentName: '',
+      eventType: fallbackRequest.eventType,
+      severity: fallbackRequest.severity,
+      details: fallbackRequest.details ?? null,
+      violationCount: 0,
+      isLocked: false,
+      maxViolations: 3,
+      lockThreshold: 4,
+      remainingStrikes: 4,
+      occurredAt: new Date().toISOString(),
+    }
+  }
+  return {
+    id: readString(payload, 'id', 'Id') ?? '',
+    clientEventId: readString(payload, 'clientEventId', 'ClientEventId') ?? fallbackRequest.clientEventId,
+    ticketId: readString(payload, 'ticketId', 'TicketId') ?? fallbackRequest.ticketId,
+    shiftId: readString(payload, 'shiftId', 'ShiftId') ?? fallbackRequest.shiftId,
+    studentId: readString(payload, 'studentId', 'StudentId') ?? fallbackRequest.studentId,
+    studentCode: readString(payload, 'studentCode', 'StudentCode') ?? '',
+    studentName: readString(payload, 'studentName', 'StudentName') ?? '',
+    eventType: readString(payload, 'eventType', 'EventType') ?? fallbackRequest.eventType,
+    severity: readString(payload, 'severity', 'Severity') ?? fallbackRequest.severity,
+    details: nullableString(payload, 'details'),
+    violationCount: typeof payload.violationCount === 'number' ? payload.violationCount : 0,
+    isLocked: payload.isLocked === true,
+    maxViolations: typeof payload.maxViolations === 'number' ? payload.maxViolations : 3,
+    lockThreshold: typeof payload.lockThreshold === 'number' ? payload.lockThreshold : 4,
+    remainingStrikes: typeof payload.remainingStrikes === 'number' ? payload.remainingStrikes : 4,
+    occurredAt: readString(payload, 'occurredAt', 'OccurredAt') ?? new Date().toISOString(),
+  }
+}
+
 function normalizeTicket(payload: unknown): StudentWorkstationTicket {
   const record = unwrapRecord(payload, 'Vé thi tại máy trạm không hợp lệ.')
   const questionsValue = record.questions
@@ -563,6 +855,17 @@ function normalizeTicket(payload: unknown): StudentWorkstationTicket {
       'Vé thi thiếu thời gian máy chủ.',
     ),
     questions,
+    isExamPublished: typeof record.isExamPublished === 'boolean' ? record.isExamPublished : undefined,
+    isKioskLocked: record.isKioskLocked === true,
+    deviceId: nullableString(record, 'deviceId'),
+    deviceLockedAt: nullableString(record, 'deviceLockedAt'),
+    deviceUnlockCount: typeof record.deviceUnlockCount === 'number' ? record.deviceUnlockCount : 0,
+    violationCount: typeof record.violationCount === 'number' ? record.violationCount : 0,
+    maxViolations: typeof record.maxViolations === 'number' ? record.maxViolations : 3,
+    lockThreshold: typeof record.lockThreshold === 'number' ? record.lockThreshold : 4,
+    remainingStrikes: typeof record.remainingStrikes === 'number' ? record.remainingStrikes : 4,
+    examAttemptType: nullableString(record, 'examAttemptType'),
+    followUps: normalizeFollowUps(record.followUps),
   }
 }
 
@@ -577,26 +880,17 @@ function normalizeTicketResponse(payload: unknown): ExamTicketResponse {
     status: requiredString(record, 'status', 'Phản hồi điểm danh thiếu trạng thái.'),
     checkedInAt: requiredString(record, 'checkedInAt', 'Phản hồi điểm danh thiếu thời điểm.'),
     examSetId: nullableString(record, 'examSetId'),
+    examSetCode: nullableString(record, 'examSetCode'),
     activeSessionToken: nullableString(record, 'activeSessionToken'),
+    deviceId: nullableString(record, 'deviceId'),
+    deviceLockedAt: nullableString(record, 'deviceLockedAt'),
+    deviceUnlockCount: typeof record.deviceUnlockCount === 'number' ? record.deviceUnlockCount : 0,
   }
 }
 
 function normalizeTicketState(payload: unknown): OfficialExamTicketStateResponse {
   const record = unwrapRecord(payload, 'Trạng thái khôi phục vé thi không hợp lệ.')
-  const rawFollowUps = Array.isArray(record.followUps) ? record.followUps : []
-  const followUps: WorkstationFollowUpItem[] = rawFollowUps
-    .filter((item): item is JsonRecord => isRecord(item))
-    .map((item) => ({
-      submissionId: requiredString(item, 'submissionId', 'Follow-up thiếu submissionId.'),
-      parentSubmissionId: nullableString(item, 'parentSubmissionId'),
-      questionId: requiredAnyString(item, ['examQuestionId', 'questionId'], 'Follow-up thiếu examQuestionId.'),
-      followUpIndex: typeof item.followUpIndex === 'number' ? item.followUpIndex : 0,
-      followUpPrompt: nullableString(item, 'followUpPrompt'),
-      generatedFollowUpPrompt: nullableString(item, 'generatedFollowUpPrompt'),
-      transcriptWhisper: nullableString(item, 'transcriptWhisper'),
-      audioObjectKey: nullableString(item, 'audioObjectKey'),
-      audioHashSha256: nullableString(item, 'audioHashSha256'),
-    }))
+  const followUps = normalizeFollowUps(record.followUps)
 
   return {
     ticketId: requiredString(record, 'ticketId', 'Trạng thái vé thiếu ticketId.'),

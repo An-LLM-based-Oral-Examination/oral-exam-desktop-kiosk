@@ -4,20 +4,24 @@ import type { AntiCheatSeverity } from '../types/mf04.types'
 interface UseAntiCheatMonitorOptions {
   active: boolean
   altTabTestMode: boolean
+  platform?: string
   onWindowBlur: (eventType: string) => Promise<void>
   onSecurityEvent: (eventType: string, details: string, severity?: AntiCheatSeverity) => Promise<void>
+  onAgentDisconnect?: (message: string) => void
   agentPollIntervalMs?: number
 }
 
 export function useAntiCheatMonitor({
   active,
   altTabTestMode,
+  platform = 'renderer',
   onWindowBlur,
   onSecurityEvent,
+  onAgentDisconnect,
   agentPollIntervalMs = 60_000,
 }: UseAntiCheatMonitorOptions): void {
-  const callbacksRef = useRef({ onWindowBlur, onSecurityEvent })
-  callbacksRef.current = { onWindowBlur, onSecurityEvent }
+  const callbacksRef = useRef({ onWindowBlur, onSecurityEvent, onAgentDisconnect })
+  callbacksRef.current = { onWindowBlur, onSecurityEvent, onAgentDisconnect }
   const reportedSignaturesRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -65,12 +69,19 @@ export function useAntiCheatMonitor({
 
     const scanNativeEnvironment = async () => {
       const snapshot = await window.kioskApi?.getSecuritySnapshot().catch(() => null)
-      if (!snapshot) return
-
       const reportOnce = (signature: string, eventType: string, details: string, severity: AntiCheatSeverity) => {
         if (reportedSignaturesRef.current.has(signature)) return
         reportedSignaturesRef.current.add(signature)
         void callbacksRef.current.onSecurityEvent(eventType, details, severity)
+      }
+
+      if (!snapshot) {
+        if (platform === 'win32') {
+          const message = 'Mất kết nối tác nhân giám sát Windows (Oes.WindowsAgent) trong giờ thi.'
+          reportOnce('WINDOWS_AGENT_DISCONNECTED', 'DEVICE_DISCONNECTION', message, 'CRITICAL')
+          callbacksRef.current.onAgentDisconnect?.(message)
+        }
+        return
       }
 
       if (snapshot.displayCount > 1) {
@@ -83,7 +94,16 @@ export function useAntiCheatMonitor({
       }
 
       const agent = snapshot.windowsAgent
-      if (!agent) return
+      if (!agent) {
+        if (platform === 'win32') {
+          const message = 'Mất kết nối tác nhân giám sát Windows (Oes.WindowsAgent) trong giờ thi.'
+          reportOnce('WINDOWS_AGENT_DISCONNECTED', 'DEVICE_DISCONNECTION', message, 'CRITICAL')
+          callbacksRef.current.onAgentDisconnect?.(message)
+        }
+        return
+      }
+
+      reportedSignaturesRef.current.delete('WINDOWS_AGENT_DISCONNECTED')
 
       if (agent.vmDetected && agent.vmIndicators.length > 0) {
         const list = agent.vmIndicators.join(', ')
@@ -123,5 +143,5 @@ export function useAntiCheatMonitor({
       unsubscribeMain?.()
       window.clearInterval(pollTimer)
     }
-  }, [active, agentPollIntervalMs, altTabTestMode])
+  }, [active, agentPollIntervalMs, altTabTestMode, platform])
 }

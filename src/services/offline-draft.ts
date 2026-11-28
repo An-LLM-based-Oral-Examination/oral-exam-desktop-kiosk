@@ -1,11 +1,19 @@
-import type { TurnDraft, TurnDraftMetadata, TurnDraftStage } from '../types/mf04.types'
+import type {
+  AntiCheatLogRequest,
+  PendingAntiCheatLogRecord,
+  TurnDraft,
+  TurnDraftMetadata,
+  TurnDraftStage,
+} from '../types/mf04.types'
 
 const databaseName = 'oral-exam-desktop-kiosk'
-const databaseVersion = 2
+const databaseVersion = 3
 const turnDraftStoreName = 'encrypted-turn-drafts'
 const legacyDraftStoreName = 'encrypted-drafts'
+const antiCheatQueueStoreName = 'pending-anti-cheat-logs'
 const keyStoreName = 'encryption-keys'
 const keyId = 'kiosk-journal-key'
+let pendingEncryptionKeyPromise: Promise<CryptoKey> | null = null
 
 interface EncryptedTurnRecord {
   id: string
@@ -26,9 +34,14 @@ export function buildTurnDraftKey(ticketId: string, questionId: string, followUp
 }
 
 function openDatabase(): Promise<IDBDatabase> {
+  if (typeof indexedDB === 'undefined') {
+    return Promise.reject(new Error('Môi trường không hỗ trợ IndexedDB.'))
+  }
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, databaseVersion)
     request.onerror = () => reject(request.error ?? new Error('Không mở được kho bản nháp cục bộ.'))
+    request.onblocked = () =>
+      reject(new Error('Kho bản nháp cục bộ đang bị khóa bởi một kết nối khác.'))
     request.onupgradeneeded = () => {
       const database = request.result
       if (!database.objectStoreNames.contains(turnDraftStoreName)) {
@@ -37,6 +50,10 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!database.objectStoreNames.contains(legacyDraftStoreName)) {
         database.createObjectStore(legacyDraftStoreName, { keyPath: 'id' })
+      }
+      if (!database.objectStoreNames.contains(antiCheatQueueStoreName)) {
+        const antiCheatStore = database.createObjectStore(antiCheatQueueStoreName, { keyPath: 'clientEventId' })
+        antiCheatStore.createIndex('byTicketId', 'ticketId', { unique: false })
       }
       if (!database.objectStoreNames.contains(keyStoreName)) {
         database.createObjectStore(keyStoreName, { keyPath: 'id' })
@@ -47,12 +64,27 @@ function openDatabase(): Promise<IDBDatabase> {
 }
 
 async function getEncryptionKey(database: IDBDatabase): Promise<CryptoKey> {
-  const existing = await idbGet<{ id: string; key: CryptoKey }>(database, keyStoreName, keyId)
-  if (existing?.key) return existing.key
+  while (pendingEncryptionKeyPromise) {
+    await pendingEncryptionKeyPromise.catch(() => undefined)
+  }
 
-  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
-  await idbPut(database, keyStoreName, { id: keyId, key })
-  return key
+  const task = (async () => {
+    const existing = await idbGet<{ id: string; key: CryptoKey }>(database, keyStoreName, keyId)
+    if (existing?.key) return existing.key
+
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+    await idbPut(database, keyStoreName, { id: keyId, key })
+    return key
+  })()
+
+  pendingEncryptionKeyPromise = task
+  try {
+    return await task
+  } finally {
+    if (pendingEncryptionKeyPromise === task) {
+      pendingEncryptionKeyPromise = null
+    }
+  }
 }
 
 async function encryptBytes(key: CryptoKey, bytes: BufferSource): Promise<{ iv: ArrayBuffer; ciphertext: ArrayBuffer }> {
@@ -75,7 +107,7 @@ function isTurnDraftStage(value: unknown): value is TurnDraftStage {
 }
 
 export async function saveTurnDraft(draft: TurnDraft): Promise<void> {
-  if (!window.crypto?.subtle || !window.indexedDB) {
+  if (!crypto?.subtle || typeof indexedDB === 'undefined') {
     throw new Error('Môi trường không hỗ trợ nhật ký mã hóa cục bộ.')
   }
   const database = await openDatabase()
@@ -101,10 +133,10 @@ export async function saveTurnDraft(draft: TurnDraft): Promise<void> {
 }
 
 export async function loadTicketTurnDrafts(ticketId: string): Promise<TurnDraft[]> {
-  if (!window.crypto?.subtle || !window.indexedDB) return []
+  if (!crypto?.subtle || typeof indexedDB === 'undefined') return []
   const database = await openDatabase()
   try {
-    const records = await idbGetAllByTicket(database, ticketId)
+    const records = await idbGetAllByTicket<EncryptedTurnRecord>(database, turnDraftStoreName, ticketId)
     if (records.length === 0) return []
     const key = await getEncryptionKey(database)
     const drafts: TurnDraft[] = []
@@ -132,7 +164,7 @@ export async function loadTicketTurnDrafts(ticketId: string): Promise<TurnDraft[
 }
 
 export async function deleteTurnDraft(draftKey: string): Promise<void> {
-  if (!window.indexedDB) return
+  if (typeof indexedDB === 'undefined') return
   const database = await openDatabase()
   try {
     await idbDelete(database, turnDraftStoreName, draftKey)
@@ -142,15 +174,83 @@ export async function deleteTurnDraft(draftKey: string): Promise<void> {
 }
 
 export async function clearTicketDrafts(ticketId: string): Promise<void> {
-  if (!window.indexedDB) return
+  if (typeof indexedDB === 'undefined') return
   const database = await openDatabase()
   try {
-    const records = await idbGetAllByTicket(database, ticketId)
+    const records = await idbGetAllByTicket<EncryptedTurnRecord>(database, turnDraftStoreName, ticketId)
     for (const record of records) {
       await idbDelete(database, turnDraftStoreName, record.id)
     }
     if (database.objectStoreNames.contains(legacyDraftStoreName)) {
       await idbDelete(database, legacyDraftStoreName, ticketId)
+    }
+    if (database.objectStoreNames.contains(antiCheatQueueStoreName)) {
+      const antiCheatRecords = await idbGetAllByTicket<PendingAntiCheatLogRecord>(
+        database,
+        antiCheatQueueStoreName,
+        ticketId,
+      )
+      for (const antiCheatRecord of antiCheatRecords) {
+        await idbDelete(database, antiCheatQueueStoreName, antiCheatRecord.clientEventId)
+      }
+    }
+  } finally {
+    database.close()
+  }
+}
+
+export async function savePendingAntiCheatLog(request: AntiCheatLogRequest): Promise<void> {
+  if (typeof indexedDB === 'undefined') return
+  const database = await openDatabase()
+  try {
+    const record: PendingAntiCheatLogRecord = {
+      clientEventId: request.clientEventId,
+      ticketId: request.ticketId,
+      createdAt: Date.now(),
+      request,
+    }
+    await idbPut(database, antiCheatQueueStoreName, record)
+  } finally {
+    database.close()
+  }
+}
+
+export async function loadPendingAntiCheatLogs(ticketId: string): Promise<PendingAntiCheatLogRecord[]> {
+  if (typeof indexedDB === 'undefined') return []
+  const database = await openDatabase()
+  try {
+    const records = await idbGetAllByTicket<PendingAntiCheatLogRecord>(
+      database,
+      antiCheatQueueStoreName,
+      ticketId,
+    )
+    return records.sort((a, b) => a.createdAt - b.createdAt)
+  } finally {
+    database.close()
+  }
+}
+
+export async function deletePendingAntiCheatLog(clientEventId: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return
+  const database = await openDatabase()
+  try {
+    await idbDelete(database, antiCheatQueueStoreName, clientEventId)
+  } finally {
+    database.close()
+  }
+}
+
+export async function clearTicketAntiCheatLogs(ticketId: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return
+  const database = await openDatabase()
+  try {
+    const records = await idbGetAllByTicket<PendingAntiCheatLogRecord>(
+      database,
+      antiCheatQueueStoreName,
+      ticketId,
+    )
+    for (const record of records) {
+      await idbDelete(database, antiCheatQueueStoreName, record.clientEventId)
     }
   } finally {
     database.close()
@@ -159,38 +259,92 @@ export async function clearTicketDrafts(ticketId: string): Promise<void> {
 
 function idbGet<T>(database: IDBDatabase, storeName: string, id: IDBValidKey): Promise<T | null> {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const finishResolve = (value: T | null) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const finishReject = (err: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
     const transaction = database.transaction(storeName, 'readonly')
     const request = transaction.objectStore(storeName).get(id)
-    request.onerror = () => reject(request.error ?? new Error('Không đọc được nhật ký cục bộ.'))
-    request.onsuccess = () => resolve((request.result as T | undefined) ?? null)
+    transaction.onerror = () => finishReject(transaction.error ?? new Error('Không đọc được nhật ký cục bộ.'))
+    transaction.onabort = () => finishReject(transaction.error ?? new Error('Giao dịch đọc nhật ký cục bộ bị hủy.'))
+    request.onerror = () => finishReject(request.error ?? new Error('Không đọc được nhật ký cục bộ.'))
+    request.onsuccess = () => finishResolve((request.result as T | undefined) ?? null)
   })
 }
 
-function idbGetAllByTicket(database: IDBDatabase, ticketId: string): Promise<EncryptedTurnRecord[]> {
+function idbGetAllByTicket<T>(database: IDBDatabase, storeName: string, ticketId: string): Promise<T[]> {
   return new Promise((resolve, reject) => {
-    const transaction = database.transaction(turnDraftStoreName, 'readonly')
-    const store = transaction.objectStore(turnDraftStoreName)
+    let settled = false
+    const finishResolve = (value: T[]) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const finishReject = (err: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
+    const transaction = database.transaction(storeName, 'readonly')
+    const store = transaction.objectStore(storeName)
     const index = store.index('byTicketId')
     const request = index.getAll(ticketId)
-    request.onerror = () => reject(request.error ?? new Error('Không đọc được danh sách nhật ký cục bộ.'))
-    request.onsuccess = () => resolve((request.result as EncryptedTurnRecord[] | undefined) ?? [])
+    transaction.onerror = () =>
+      finishReject(transaction.error ?? new Error('Không đọc được danh sách nhật ký cục bộ.'))
+    transaction.onabort = () =>
+      finishReject(transaction.error ?? new Error('Giao dịch đọc danh sách nhật ký cục bộ bị hủy.'))
+    request.onerror = () => finishReject(request.error ?? new Error('Không đọc được danh sách nhật ký cục bộ.'))
+    request.onsuccess = () => finishResolve((request.result as T[] | undefined) ?? [])
   })
 }
 
 function idbPut(database: IDBDatabase, storeName: string, value: unknown): Promise<void> {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const finishResolve = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    const finishReject = (err: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
     const transaction = database.transaction(storeName, 'readwrite')
     const request = transaction.objectStore(storeName).put(value)
-    request.onerror = () => reject(request.error ?? new Error('Không lưu được nhật ký cục bộ.'))
-    request.onsuccess = () => resolve()
+    transaction.onerror = () => finishReject(transaction.error ?? new Error('Không lưu được nhật ký cục bộ.'))
+    transaction.onabort = () => finishReject(transaction.error ?? new Error('Giao dịch lưu nhật ký cục bộ bị hủy.'))
+    request.onerror = () => finishReject(request.error ?? new Error('Không lưu được nhật ký cục bộ.'))
+    request.onsuccess = () => finishResolve()
   })
 }
 
 function idbDelete(database: IDBDatabase, storeName: string, id: IDBValidKey): Promise<void> {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const finishResolve = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    const finishReject = (err: unknown) => {
+      if (settled) return
+      settled = true
+      reject(err)
+    }
     const transaction = database.transaction(storeName, 'readwrite')
     const request = transaction.objectStore(storeName).delete(id)
-    request.onerror = () => reject(request.error ?? new Error('Không xóa được nhật ký cục bộ.'))
-    request.onsuccess = () => resolve()
+    transaction.onerror = () => finishReject(transaction.error ?? new Error('Không xóa được nhật ký cục bộ.'))
+    transaction.onabort = () => finishReject(transaction.error ?? new Error('Giao dịch xóa nhật ký cục bộ bị hủy.'))
+    request.onerror = () => finishReject(request.error ?? new Error('Không xóa được nhật ký cục bộ.'))
+    request.onsuccess = () => finishResolve()
   })
 }
