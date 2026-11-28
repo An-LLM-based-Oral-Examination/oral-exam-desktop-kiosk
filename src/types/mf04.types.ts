@@ -13,7 +13,21 @@ export interface ProblemDetails {
   status?: number
   detail?: string
   instance?: string
+  errorCode?: string
   errors?: Record<string, string[]>
+}
+
+export type SessionRevocationReason =
+  | 'ACCOUNT_LOCKED'
+  | 'REFRESH_CONFLICT'
+  | 'SESSION_REVOKED'
+
+export interface SessionRevokedEvent {
+  status: number
+  reason: SessionRevocationReason
+  errorCode?: string
+  message: string
+  error: unknown
 }
 
 export type ByodConflictCode =
@@ -87,6 +101,17 @@ export interface StudentWorkstationTicket {
   maxFollowUpQuestions: number
   serverTimeUtc: string
   questions: WorkstationExamQuestion[]
+  isExamPublished?: boolean
+  isKioskLocked?: boolean
+  deviceId?: string | null
+  deviceLockedAt?: string | null
+  deviceUnlockCount?: number
+  violationCount?: number
+  maxViolations?: number
+  lockThreshold?: number
+  remainingStrikes?: number
+  examAttemptType?: string | null
+  followUps?: WorkstationFollowUpItem[]
 }
 
 export interface ExamTicketResponse {
@@ -98,7 +123,11 @@ export interface ExamTicketResponse {
   status: string
   checkedInAt: string
   examSetId: string | null
+  examSetCode?: string | null
   activeSessionToken?: string | null
+  deviceId?: string | null
+  deviceLockedAt?: string | null
+  deviceUnlockCount?: number
 }
 
 export interface WorkstationFollowUpItem {
@@ -248,9 +277,18 @@ export interface TurnDraftMetadata {
   isManuallyEdited: boolean
   objectKey: string | null
   sha256: string | null
+  sha256Base64?: string | null
+  uploadAuthorization?: AudioUploadAuthorization | null
   stage: TurnDraftStage
   createdAt: string
   updatedAt: string
+}
+
+export interface PendingAntiCheatLogRecord {
+  clientEventId: string
+  ticketId: string
+  createdAt: number
+  request: AntiCheatLogRequest
 }
 
 export interface TurnDraft {
@@ -270,6 +308,8 @@ export interface SpeechTranscriptionResult {
   text: string
   rawText?: string | null
   provider?: string | null
+  timestampsJson?: string | null
+  confidenceScore?: number | null
 }
 
 export type AntiCheatSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
@@ -282,6 +322,25 @@ export interface AntiCheatLogRequest {
   eventType: string
   severity: AntiCheatSeverity
   details?: string | null
+}
+
+export interface ExamAntiCheatLogResponse {
+  id: string
+  clientEventId: string
+  ticketId: string
+  shiftId: string
+  studentId: string
+  studentCode: string
+  studentName: string
+  eventType: string
+  severity: string
+  details: string | null
+  violationCount: number
+  isLocked: boolean
+  maxViolations: number
+  lockThreshold: number
+  remainingStrikes: number
+  occurredAt: string
 }
 
 export type BlockReason = 'ANTI_CHEAT' | 'BYOD_CONFLICT' | 'SERVER_LOCKED'

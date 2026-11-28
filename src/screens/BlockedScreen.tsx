@@ -6,6 +6,7 @@ interface BlockedScreenProps {
   detailMessage?: string
   checkingStatus: boolean
   onCheckStatus: () => Promise<void>
+  onReturnToSignIn: () => void
 }
 
 export function BlockedScreen({
@@ -14,13 +15,16 @@ export function BlockedScreen({
   detailMessage,
   checkingStatus,
   onCheckStatus,
+  onReturnToSignIn,
 }: BlockedScreenProps) {
   const badgeText =
     reason === 'BYOD_CONFLICT'
       ? 'Xung đột thiết bị BYOD'
       : reason === 'SERVER_LOCKED'
         ? 'Phiên thi đã được khóa từ hệ thống'
-        : `Đình chỉ an ninh · ${blurCount} lần mất tiêu điểm`
+        : blurCount > 0
+          ? `Đình chỉ an ninh · ${blurCount} lần mất tiêu điểm`
+          : 'Đình chỉ an ninh'
 
   const heading =
     reason === 'BYOD_CONFLICT'
@@ -43,8 +47,11 @@ export function BlockedScreen({
           'Phiên thi đã bị khóa ở kiosk do vi phạm anti-cheat. Không thể tiếp tục hoặc tự ý nộp bài từ màn hình này. Vui lòng giữ nguyên trạng thái máy và báo ngay cho Giám thị phòng thi.'}
       </p>
       <div className="state-actions">
-        <button className="btn btn-secondary" type="button" onClick={onCheckStatus} disabled={checkingStatus}>
-          {checkingStatus ? 'Đang kiểm tra trạng thái…' : 'Kiểm tra lại trạng thái từ máy chủ'}
+        <button className="btn btn-primary" type="button" onClick={onCheckStatus} disabled={checkingStatus}>
+          {checkingStatus ? 'Đang kiểm tra trạng thái…' : 'Kiểm tra lại trạng thái vé'}
+        </button>
+        <button className="btn btn-secondary" type="button" onClick={onReturnToSignIn} disabled={checkingStatus}>
+          Quay về đăng nhập
         </button>
       </div>
     </section>

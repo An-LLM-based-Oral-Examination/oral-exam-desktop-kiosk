@@ -48,12 +48,28 @@ declare global {
     windowsAgentAvailable: boolean
   }
 
+  interface KioskR2UploadRequest {
+    uploadUrl: string
+    headers: Record<string, string>
+    data: ArrayBuffer
+  }
+
+  interface KioskR2UploadResponse {
+    ok: boolean
+    status: number
+    statusText: string
+    headers: Record<string, string>
+    bodyText?: string
+    errorMessage?: string
+  }
+
   interface KioskApi {
     getRuntimeInfo: () => Promise<KioskRuntimeInfo | null>
     getSecuritySnapshot: () => Promise<KioskSecuritySnapshot | null>
     onSecurityEvent: (listener: (event: KioskSecurityEvent) => void) => () => void
     requestExit: () => Promise<boolean>
     authorizeExitAfterSubmit: () => Promise<boolean>
+    uploadAudioToR2: (request: KioskR2UploadRequest) => Promise<KioskR2UploadResponse>
   }
 
   interface Window {
