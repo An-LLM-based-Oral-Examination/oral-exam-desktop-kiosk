@@ -5,6 +5,7 @@ interface PreCheckScreenProps {
   displayCount: number
   isKioskMode: boolean
   altTabTestMode: boolean
+  platform: string
   securitySnapshot: KioskSecuritySnapshot | null
   scanningEnvironment: boolean
   busy: boolean
@@ -20,6 +21,7 @@ export function PreCheckScreen({
   displayCount,
   isKioskMode,
   altTabTestMode,
+  platform,
   securitySnapshot,
   scanningEnvironment,
   busy,
@@ -33,9 +35,17 @@ export function PreCheckScreen({
 
   const effectiveDisplayCount = Math.max(displayCount, securitySnapshot?.displayCount ?? 1)
   const agent = securitySnapshot?.windowsAgent ?? null
+  const isWindows = platform === 'win32'
+  const windowsAgentMissing = isWindows && !agent && !scanningEnvironment
+
   const envIssues: string[] = []
   if (effectiveDisplayCount > 1) {
     envIssues.push(`Đang kết nối ${effectiveDisplayCount} màn hình (yêu cầu chỉ dùng 1 màn hình).`)
+  }
+  if (windowsAgentMissing) {
+    envIssues.push(
+      'Không kết nối được tác nhân giám sát Windows (Oes.WindowsAgent). Không thể xác minh môi trường thi an toàn.',
+    )
   }
   if (agent?.remoteControlDetected && agent.remoteControlProcesses.length > 0) {
     envIssues.push(`Đang chạy phần mềm điều khiển từ xa: ${agent.remoteControlProcesses.join(', ')}.`)
@@ -48,7 +58,7 @@ export function PreCheckScreen({
   }
 
   const enforceStrictEnv = isKioskMode && !altTabTestMode
-  const blockedByEnvironment = enforceStrictEnv && envIssues.length > 0
+  const blockedByEnvironment = enforceStrictEnv && (envIssues.length > 0 || (isWindows && !agent))
 
   return (
     <section className="card" aria-labelledby="precheck-heading">
@@ -114,14 +124,18 @@ export function PreCheckScreen({
           {effectiveDisplayCount <= 1 ? '1 màn hình (Hợp lệ)' : `Phát hiện ${effectiveDisplayCount} màn hình`}
         </span>
         <span className="env-item">
-          <span className={envIssues.length === 0 ? 'env-check' : 'env-warn'}>
-            {envIssues.length === 0 ? '✓' : '!'}
+          <span className={envIssues.length === 0 && !(isWindows && !agent) ? 'env-check' : 'env-warn'}>
+            {envIssues.length === 0 && !(isWindows && !agent) ? '✓' : '!'}
           </span>
           {agent
             ? envIssues.length === 0
               ? 'Môi trường Windows sạch'
               : `Cảnh báo an ninh (${envIssues.length})`
-            : 'Giám sát cấp ứng dụng'}
+            : isWindows
+              ? scanningEnvironment
+                ? 'Đang kiểm tra Oes.WindowsAgent…'
+                : 'Mất kết nối Oes.WindowsAgent'
+              : 'Giám sát cấp ứng dụng'}
         </span>
       </div>
 
@@ -154,7 +168,7 @@ export function PreCheckScreen({
         <button
           className="btn btn-primary"
           type="button"
-          disabled={!microphoneReady || busy || blockedByEnvironment}
+          disabled={!microphoneReady || busy || scanningEnvironment || blockedByEnvironment}
           onClick={onCheckIn}
         >
           Điểm danh và vào phòng chờ →

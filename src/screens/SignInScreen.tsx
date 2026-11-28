@@ -7,6 +7,8 @@ interface SignInScreenProps {
   newPassword: string
   mustChangePassword: boolean
   busy: boolean
+  runtimeReady: boolean
+  runtimeError?: string
   appVersion: string
   isKioskMode: boolean
   onUsername: (value: string) => void
@@ -14,6 +16,8 @@ interface SignInScreenProps {
   onNewPassword: (value: string) => void
   onLogin: (event: FormEvent<HTMLFormElement>) => Promise<void>
   onChangePassword: (event: FormEvent<HTMLFormElement>) => Promise<void>
+  onCancelChangePassword: () => void
+  onRetryRuntime?: () => void
 }
 
 export function SignInScreen({
@@ -22,6 +26,8 @@ export function SignInScreen({
   newPassword,
   mustChangePassword,
   busy,
+  runtimeReady,
+  runtimeError,
   appVersion,
   isKioskMode,
   onUsername,
@@ -29,9 +35,53 @@ export function SignInScreen({
   onNewPassword,
   onLogin,
   onChangePassword,
+  onCancelChangePassword,
+  onRetryRuntime,
 }: SignInScreenProps) {
   const [showPassword, setShowPassword] = useState(false)
   const [showNewPassword, setShowNewPassword] = useState(false)
+
+  if (!runtimeReady) {
+    return (
+      <section className="card-elevated" aria-labelledby="signin-heading">
+        <div className="auth-header">
+          <div className="auth-emblem" aria-hidden="true">
+            OE
+          </div>
+          <h1 id="signin-heading">
+            {runtimeError ? 'Không thể khởi tạo Kiosk' : 'Đang khởi tạo môi trường Kiosk'}
+          </h1>
+          <p>
+            {runtimeError
+              ? runtimeError
+              : 'Hệ thống đang xác minh định danh thiết bị và cấu hình máy chủ phòng thi an toàn…'}
+          </p>
+        </div>
+
+        <div className="runtime-gate" role="status" aria-live="polite">
+          {runtimeError ? (
+            <button
+              className="btn btn-secondary btn-full"
+              type="button"
+              onClick={onRetryRuntime}
+            >
+              Thử khởi tạo lại
+            </button>
+          ) : (
+            <div className="runtime-gate-loading">
+              <span className="practice-status-spinner" aria-hidden="true" />
+              <span>Đang đồng bộ định danh thiết bị BYOD…</span>
+            </div>
+          )}
+        </div>
+
+        <div className="auth-footer">
+          <span>{isKioskMode ? 'Chế độ khóa Kiosk' : 'Đang kiểm tra môi trường'}</span>
+          <span>Phiên bản {appVersion}</span>
+        </div>
+      </section>
+    )
+  }
 
   return (
     <section className="card-elevated" aria-labelledby="signin-heading">
@@ -118,6 +168,17 @@ export function SignInScreen({
         <button className="btn btn-primary btn-full" type="submit" disabled={busy}>
           {busy ? 'Đang xác thực…' : mustChangePassword ? 'Đổi mật khẩu và tiếp tục' : 'Đăng nhập'}
         </button>
+
+        {mustChangePassword ? (
+          <button
+            className="btn btn-secondary btn-full"
+            type="button"
+            onClick={onCancelChangePassword}
+            disabled={busy}
+          >
+            Quay lại đăng nhập
+          </button>
+        ) : null}
       </form>
 
       <div className="auth-footer">

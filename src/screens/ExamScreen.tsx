@@ -1,10 +1,12 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import type { ActiveFollowUpState, StudentWorkstationTicket } from '../types/mf04.types'
 import { formatDuration } from '../utils/formatters'
+import { resolveQuestionImageUrl } from '../utils/question-image'
 import { evaluateTranscriptEdit } from '../utils/transcript-diff'
 
 interface ExamScreenProps {
   ticket: StudentWorkstationTicket
+  apiBaseUrl?: string
   question: StudentWorkstationTicket['questions'][number]
   questionIndex: number
   completedMainCount: number
@@ -42,6 +44,7 @@ function formatRecordingTimer(totalSeconds: number): string {
 
 export function ExamScreen({
   ticket,
+  apiBaseUrl,
   question,
   questionIndex,
   completedMainCount,
@@ -108,7 +111,13 @@ export function ExamScreen({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [canUseSpaceShortcut, onToggleRecording])
 
-  const hasQuestionImage = Boolean(question.imageUrl) && !activeFollowUp
+  const resolvedImageUrl = resolveQuestionImageUrl(question.imageUrl, apiBaseUrl)
+  const hasQuestionImage = Boolean(resolvedImageUrl) && !activeFollowUp
+  const [imageLoadFailed, setImageLoadFailed] = useState(false)
+
+  useEffect(() => {
+    setImageLoadFailed(false)
+  }, [question.questionId, resolvedImageUrl])
 
   return (
     <section className="practice-exam-shell" aria-labelledby="exam-heading">
@@ -175,17 +184,24 @@ export function ExamScreen({
       <div className="practice-exam-body">
         {/* Question Block */}
         <article className={`practice-question-section ${hasQuestionImage ? 'has-image' : ''}`}>
-          {hasQuestionImage && question.imageUrl ? (
+          {hasQuestionImage && resolvedImageUrl ? (
             <figure className="practice-question-figure">
-              <img
-                src={question.imageUrl}
-                alt={question.imageDescription ?? `Hình minh họa cho ${question.title}`}
-                loading="lazy"
-                referrerPolicy="no-referrer"
-                onError={(event) => {
-                  event.currentTarget.style.display = 'none'
-                }}
-              />
+              {!imageLoadFailed ? (
+                <img
+                  key={`${question.questionId}:${resolvedImageUrl}`}
+                  src={resolvedImageUrl}
+                  alt={question.imageDescription ?? `Hình minh họa cho ${question.title}`}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={() => {
+                    setImageLoadFailed(true)
+                  }}
+                />
+              ) : (
+                <p className="field-hint" role="status">
+                  Không thể tải hình minh họa{question.imageDescription ? ` (${question.imageDescription})` : '.'}
+                </p>
+              )}
               {question.imageDescription ? <figcaption>{question.imageDescription}</figcaption> : null}
             </figure>
           ) : null}

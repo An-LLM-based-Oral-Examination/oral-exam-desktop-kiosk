@@ -2,9 +2,15 @@ interface WaitingTicketScreenProps {
   studentName: string
   busy: boolean
   onRetry: () => Promise<void>
+  onReturnToSignIn?: () => void
 }
 
-export function WaitingTicketScreen({ studentName, busy, onRetry }: WaitingTicketScreenProps) {
+export function WaitingTicketScreen({
+  studentName,
+  busy,
+  onRetry,
+  onReturnToSignIn,
+}: WaitingTicketScreenProps) {
   return (
     <section className="card state-card" aria-labelledby="waiting-heading">
       <div className="state-icon state-icon-warning" aria-hidden="true">
@@ -22,6 +28,11 @@ export function WaitingTicketScreen({ studentName, busy, onRetry }: WaitingTicke
         <button className="btn btn-primary" type="button" onClick={onRetry} disabled={busy}>
           {busy ? 'Đang kiểm tra…' : 'Kiểm tra lại vé thi'}
         </button>
+        {onReturnToSignIn ? (
+          <button className="btn btn-secondary" type="button" onClick={onReturnToSignIn} disabled={busy}>
+            Quay về đăng nhập
+          </button>
+        ) : null}
       </div>
     </section>
   )

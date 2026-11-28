@@ -58,17 +58,22 @@ export function configureWindowSecurity(
     const isNavigationShortcut =
       normalizedKey === 'f5' ||
       normalizedKey === 'f11' ||
-      (input.control && ['r', 'l', 'n', 't', 'w', 'q', 'escape'].includes(normalizedKey)) ||
+      normalizedKey === 'browserback' ||
+      normalizedKey === 'browserforward' ||
+      normalizedKey === 'browserrefresh' ||
+      (input.control && ['r', 'l', 'n', 't', 'w', 'q', 'escape', 'f4', 'p', 's', 'u'].includes(normalizedKey)) ||
       (input.alt && ['left', 'right', 'f4', 'escape', 'space'].includes(normalizedKey)) ||
       input.meta
 
     if (isDeveloperShortcut || isTaskSwitchShortcut || isNavigationShortcut) {
       event.preventDefault()
-      emitSecurityEvent({
-        eventType: 'TAB_SWITCH',
-        details: `Electron chặn tổ hợp phím: ${input.key}`,
-        timestampUtc: new Date().toISOString(),
-      })
+      if (input.type === 'keyDown' && !input.isAutoRepeat) {
+        emitSecurityEvent({
+          eventType: 'TAB_SWITCH',
+          details: `Electron chặn tổ hợp phím: ${input.key}`,
+          timestampUtc: new Date().toISOString(),
+        })
+      }
     }
   })
 

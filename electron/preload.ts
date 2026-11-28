@@ -41,6 +41,21 @@ type SecurityEventPayload = {
   timestampUtc: string
 }
 
+type R2UploadRequest = {
+  uploadUrl: string
+  headers: Record<string, string>
+  data: ArrayBuffer
+}
+
+type R2UploadResponse = {
+  ok: boolean
+  status: number
+  statusText: string
+  headers: Record<string, string>
+  bodyText?: string
+  errorMessage?: string
+}
+
 const configuredApiBaseUrl =
   process.env.ORAL_EXAM_API_BASE_URL ?? process.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000/api/v1'
 
@@ -55,7 +70,9 @@ contextBridge.exposeInMainWorld('kioskApi', {
       isKioskMode: info.isKioskMode ?? info.kioskMode,
       altTabTestMode: info.altTabTestMode ?? false,
       platform: info.platform,
-      apiBaseUrl: info.apiBaseUrl ?? configuredApiBaseUrl,
+      apiBaseUrl: info.isPackaged
+        ? (info.apiBaseUrl ?? 'https://oralexam.io.vn/api/v1')
+        : (info.apiBaseUrl ?? configuredApiBaseUrl),
       deviceId: info.deviceId ?? '',
       kioskVersion: info.kioskVersion ?? `desktop-kiosk-${info.appVersion}`,
       displayCount: info.displayCount ?? 1,
@@ -76,4 +93,6 @@ contextBridge.exposeInMainWorld('kioskApi', {
   },
   requestExit: (): Promise<boolean> => ipcRenderer.invoke('request-exit'),
   authorizeExitAfterSubmit: (): Promise<boolean> => ipcRenderer.invoke('authorize-exit-after-submit'),
+  uploadAudioToR2: (request: R2UploadRequest): Promise<R2UploadResponse> =>
+    ipcRenderer.invoke('upload-audio-to-r2', request) as Promise<R2UploadResponse>,
 })
